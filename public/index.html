@@ -2488,7 +2488,7 @@ async function openSettings() {
   if (typeof loadLicense === "function") loadLicense();
   const r = await api("/api/billing/settings");
   const pubBase = (r.ok && r.data && r.data.public_url) ? String(r.data.public_url).trim().replace(/\/$/, "") : "";
-  const urlBase = pubBase || location.origin;
+  const urlBase = pubBase || "https://jmwifi.pro";
   $("set-webhook-url").textContent = urlBase + "/api/billing/paymongo/webhook";
   if ($("set-kitifi-webhook-url")) $("set-kitifi-webhook-url").textContent = urlBase + "/api/billing/kitifi/webhook";
   if ($("kitifi-webhook-display")) $("kitifi-webhook-display").textContent = urlBase + "/api/billing/kitifi/webhook";
