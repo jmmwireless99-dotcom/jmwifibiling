@@ -56,6 +56,13 @@ A complete MikroTik billing and operations panel for PPPoE, IPoE, Hotspot, and J
 3. Open **http://localhost:3000**
 4. Login: **admin** / **admin** (change immediately)
 
+### KitFi GCash webhook setup
+
+1. Settings → set **Public URL** (must be internet-reachable, e.g. Cloudflare tunnel).
+2. Copy webhook URL: `{public_url}/api/billing/kitifi/webhook`
+3. In **KitFi hotspot management**, paste that URL under GCash payment webhook.
+4. Optional: set amount→profile map JSON, e.g. `{"5":"2h","10":"4h","20":"1d"}`.
+
 ---
 
 **An all-in-one, offline management system for MikroTik / piso-WiFi operators — billing, automation, inventory, reporting, and customer management on your own computer.**
