@@ -1,0 +1,107 @@
+================================================================================
+  JM BILLING — jmwifi.pro  (Hostinger domain + Cloudflare Tunnel)
+================================================================================
+
+Domain:  jmwifi.pro  (registered at Hostinger)
+Panel:   https://billing.jmwifi.pro
+Pay:     https://billing.jmwifi.pro/pay
+Apply:   https://billing.jmwifi.pro/apply
+
+cloudflared on this PC:  C:\Cloudflare\cloudflared.exe
+
+Current status: domain uses Hostinger parking DNS (ns1.dns-parking.com).
+You must switch nameservers to Cloudflare (Step 2 below).
+
+================================================================================
+STEP 1 — Add jmwifi.pro to Cloudflare
+================================================================================
+1. https://dash.cloudflare.com → Add a site
+2. Enter:  jmwifi.pro
+3. Plan: FREE
+4. Cloudflare scans DNS → Continue
+5. COPY the two nameservers Cloudflare gives you, for example:
+      ada.ns.cloudflare.com
+      bob.ns.cloudflare.com
+   (Yours will be different — use what Cloudflare shows YOU.)
+
+================================================================================
+STEP 2 — Hostinger: change nameservers
+================================================================================
+1. https://hpanel.hostinger.com
+2. Domains → jmwifi.pro → DNS / Nameservers
+3. Change to: Custom nameservers
+4. Paste Cloudflare's TWO nameservers from Step 1
+5. Save
+
+Wait until Cloudflare dashboard shows jmwifi.pro as ACTIVE (15 min – 24 hrs).
+
+================================================================================
+STEP 3 — Create Cloudflare Tunnel
+================================================================================
+1. https://one.dash.cloudflare.com
+2. Networks → Tunnels → Create a tunnel
+3. Connector: Cloudflared
+4. Tunnel name:  jm-billing
+5. Save tunnel
+
+Copy the install token (long text starting with eyJ...).
+
+================================================================================
+STEP 4 — Public hostname (exact values for jmwifi.pro)
+================================================================================
+Tab: Public Hostname → Add a public hostname
+
+  Subdomain:     billing
+  Domain:        jmwifi.pro
+  Path:          (leave empty)
+  Type:          HTTP
+  URL:           localhost:3000
+
+Save.
+
+(Optional — customer-only subdomain, same app):
+  Subdomain: pay
+  Domain:    jmwifi.pro
+  Type:      HTTP
+  URL:       localhost:3000
+
+Cloudflare creates DNS automatically (CNAME → cfargotunnel.com).
+
+================================================================================
+STEP 5 — Run on this Windows PC
+================================================================================
+1. Right-click deploy\2-install-tunnel.bat → Run as administrator
+   Paste your tunnel token when asked.
+
+2. Double-click deploy\3-start-all.bat
+   (or START.bat in the project folder)
+
+3. Test:  https://billing.jmwifi.pro
+
+================================================================================
+STEP 6 — JM Billing Settings
+================================================================================
+Login: https://billing.jmwifi.pro
+Default: admin / admin  → CHANGE PASSWORD IMMEDIATELY
+
+Settings:
+  Public URL:     https://billing.jmwifi.pro
+  Business name:  JM WiFi  (or your shop name)
+  MikroTik IP:    your router LAN IP
+  Test connection → Save
+
+================================================================================
+STEP 7 — Autostart (optional)
+================================================================================
+  deploy\setup-autostart.bat     → billing starts when you log in
+  Tunnel runs as Windows service after step 5
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+502 Bad Gateway       → JM Billing not running; run deploy\3-start-all.bat
+DNS not working       → Nameservers still on Hostinger; wait or recheck Step 2
+Tunnel not connected  → Services → Cloudflared agent → Start
+                      → Or re-run 2-install-tunnel.bat as Admin
+
+================================================================================
