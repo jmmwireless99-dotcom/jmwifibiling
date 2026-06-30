@@ -1,0 +1,14 @@
+# Secrets and local config
+.env
+license.key
+
+# Runtime database (created on first run; back up separately if needed)
+billing.db
+billing.db-wal
+billing.db-shm
+backups/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
