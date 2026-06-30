@@ -715,8 +715,8 @@ const requestHandler = async (req, res) => {
     if (pathname === "/api/portal/login" && req.method === "POST") {
       let b2 = {}; try { b2 = JSON.parse((await readBody(req)) || "{}"); } catch {}
       const u = String(b2.username || "").trim(), pw = String(b2.password || "");
-      const cust = Customers.byUsername(u);
-      if (!cust || !u) return send(res, 401, { ok: false, error: "Account not found. Check your username." });
+      const cust = findPayCustomer(u, null);
+      if (!cust || !u) return send(res, 401, { ok: false, error: "Account not found. Check your username / account no. / mobile." });
       if (!cust.password) return send(res, 401, { ok: false, error: "This account has no portal password yet. Please contact us to set one." });
       if (cust.password !== pw) return send(res, 401, { ok: false, error: "Wrong password." });
       const token = CSessions.create(cust.id);
@@ -744,7 +744,8 @@ const requestHandler = async (req, res) => {
       try { const uk = Usage.forKey(String(c.username || "").toLowerCase()); if (uk) usage = { up: uk.up, down: uk.down, capGb: Number(c.plan_cap) || 0 }; } catch {}
       const lastProof = Proofs.latestForUser(c.username);
       return send(res, 200, { ok: true, biz: s.biz_name || "Internet Service", logo: s.brand_logo || "",
-        customer: { name: c.name, username: c.username, status: c.status, expiry: c.expiry || "", plan_name: c.plan_name || "", area: c.area || "" },
+        customer: { id: c.id, name: c.name, username: c.username, status: c.status, expiry: c.expiry || "", plan_name: c.plan_name || "", area: c.area || "",
+          account: payAccountRef(c), conn_type: c.conn_type || "pppoe" },
         invoices, payments, usage, pay, lastProof: lastProof ? { status: lastProof.status, reason: lastProof.reject_reason || "" } : null });
     }
     if (pathname === "/pay" && req.method === "GET") {
@@ -799,18 +800,7 @@ const requestHandler = async (req, res) => {
       const s = Settings.all();
       const pay = { gcash_name: s.gcash_name || "", gcash_number: s.gcash_number || "", gcash_qr: s.gcash_qr || "",
         maya_name: s.maya_name || "", maya_number: s.maya_number || "", maya_qr: s.maya_qr || "", bank_details: s.bank_details || "" };
-      // Match by username (PPPoE) OR by account id / MAC / static IP (IPoE) OR by contact number.
-      const norm = (x) => String(x || "").toLowerCase().replace(/[\s:-]/g, "");
-      const all = Customers.list();
-      const cust = u ? all.find((c) =>
-        (c.username || "").toLowerCase() === u ||
-        (c.account_code || "").toLowerCase() === u ||
-        ("ipoe-" + (c.username || "")).toLowerCase() === u ||
-        ("ipoe-" + String(c.id).padStart(4, "0")).toLowerCase() === u ||
-        norm(c.mac) === norm(u) ||
-        (c.static_ip || "") === u ||
-        norm(c.contact) === norm(u)
-      ) : null;
+      const cust = findPayCustomer(u, null);
       if (!cust) return send(res, 200, { ok: true, biz, logo, pay, customer: null, invoices: [] });
       const invoices = Invoices.list({ customer_id: cust.id, status: "unpaid" })
         .map((i) => ({ id: i.id, period: i.period, amount: i.amount, due_date: i.due_date }));
@@ -858,11 +848,10 @@ const requestHandler = async (req, res) => {
       const raw = (await readBody(req)) || "";
       if (raw.length > 8_000_000) return send(res, 413, { ok: false, error: "Image too large (max ~6MB)." });
       const b = JSON.parse(raw || "{}");
-      const u = (b.username || "").trim().toLowerCase();
-      const cust = u ? Customers.list().find((c) => (c.username || "").toLowerCase() === u) : (b.customer_id ? Customers.get(b.customer_id) : null);
+      const cust = findPayCustomer(b.account || b.username, b.customer_id);
       let inv = b.invoice_id ? Invoices.get(Number(b.invoice_id)) : null;
       if (!inv && cust) inv = (Invoices.list({ customer_id: cust.id, status: "unpaid" })[0]) || null;
-      if (!b.image) return send(res, 400, { ok: false, error: "Please attach a photo of your receipt." });
+      if (!b.image && !String(b.reference || "").trim()) return send(res, 400, { ok: false, error: "Please attach a receipt photo or enter your reference number." });
       // ---- anti-fraud screening (flags only; reused references are blocked) ----
       const screen = screenProof({ reference: b.reference || "", image: b.image, priorRefs: Proofs.allRefs(), customerId: cust ? cust.id : null });
       if (screen.severity === "block") {
@@ -881,7 +870,8 @@ const requestHandler = async (req, res) => {
             : { code: "sms-amount-mismatch", level: "warn", msg: `A GCash SMS with this reference arrived but for ₱${Number(hit.amount).toLocaleString()}, not ₱${Number(inv.amount).toLocaleString()} — verify.` });
         }
       } catch {}
-      const proof = Proofs.add({ invoice_id: inv ? inv.id : null, customer_id: cust ? cust.id : null, username: b.username || (cust && cust.username) || "", image: b.image, note: b.note || "", reference: b.reference || "", amount: inv ? inv.amount : 0, flags: JSON.stringify(screen.flags || []) });
+      const proofAmt = inv ? inv.amount : (cust ? Number(cust.plan_price) || 0 : 0);
+      const proof = Proofs.add({ invoice_id: inv ? inv.id : null, customer_id: cust ? cust.id : null, username: payAccountRef(cust) || b.username || (cust && cust.username) || "", image: b.image || "", note: b.note || "", reference: b.reference || "", amount: proofAmt, flags: JSON.stringify(screen.flags || []) });
       // Auto-approve when an SMS confirmed the exact payment and the operator opted in.
       if (smsMatch && smsMatch.ok && smsMatch.amountOk && Settings.get("sms_autoapprove", "0") === "1" && inv && cust) {
         try {
@@ -895,17 +885,21 @@ const requestHandler = async (req, res) => {
       const c = tg(), chat = tgChat();
       if (c && chat) {
         try {
-          const { buffer } = dataUrlToBuffer(b.image);
           const caption = `🧾 <b>PAYMENT SUBMITTED</b>\nUser: <b>${proof.username || (cust && cust.name) || "unknown"}</b>\n` +
-            (inv ? `Plan: ${inv.plan_name || "—"}\nAmount: ₱${Number(inv.amount).toLocaleString()}\nInvoice: INV-${inv.id} · ${inv.period}\n` : "") +
+            (inv ? `Plan: ${inv.plan_name || "—"}\nAmount: ₱${Number(inv.amount).toLocaleString()}\nInvoice: INV-${inv.id} · ${inv.period}\n` : (proofAmt ? `Amount: ₱${Number(proofAmt).toLocaleString()}\n` : "")) +
             (b.reference ? `Reference: <b>${b.reference}</b>\n` : "") +
             (b.note ? `Note: ${b.note}\n` : "") +
             (smsMatch && smsMatch.ok && smsMatch.amountOk ? `\n✅ <b>SMS-CONFIRMED</b> — matching ${escapeHtml(String(smsMatch.by))} found on your SIM.\n` : "") +
             (screen.flags && screen.flags.filter((f) => f.level !== "ok").length ? `\n⚠️ <b>Review flags:</b> ${screen.flags.filter((f) => f.level !== "ok").map((f) => escapeHtml(f.msg)).join("; ")}\n` : "") +
             `Approve to reconnect & extend.`;
           const kb = { inline_keyboard: [[{ text: "✅ APPROVE", callback_data: "approve:" + proof.id }, { text: "❌ REJECT", callback_data: "reject:" + proof.id }]] };
-          const r = await c.sendPhoto(chat, buffer, caption, kb);
-          if (r && r.json && r.json.ok) Proofs.setMsgId(proof.id, r.json.result.message_id);
+          if (b.image) {
+            const { buffer } = dataUrlToBuffer(b.image);
+            const r = await c.sendPhoto(chat, buffer, caption, kb);
+            if (r && r.json && r.json.ok) Proofs.setMsgId(proof.id, r.json.result.message_id);
+          } else {
+            await c.sendMessage(chat, caption, kb);
+          }
         } catch (e) { Audit.add({ type: "auto", action: "telegram-error", detail: e.message, ok: false }); }
       }
       return send(res, 200, { ok: true, message: "Thank you! Your proof was sent for verification. Your connection will be restored once approved." });
@@ -917,9 +911,7 @@ const requestHandler = async (req, res) => {
       const raw = (await readBody(req)) || "";
       if (raw.length > 8_000_000) return send(res, 413, { ok: false, error: "Image too large (max ~6MB)." });
       const b = JSON.parse(raw || "{}");
-      const u = (b.account || b.username || "").trim().toLowerCase();
-      const norm = (x) => String(x || "").toLowerCase().replace(/[\s:-]/g, "");
-      const cust = u ? Customers.list().find((c) => (c.username || "").toLowerCase() === u || (c.account_code || "").toLowerCase() === u || ("ipoe-" + (c.username || "")).toLowerCase() === u || norm(c.mac) === norm(u) || ("ipoe-" + String(c.id).padStart(4, "0")).toLowerCase() === u) : (b.customer_id ? Customers.get(b.customer_id) : null);
+      const cust = findPayCustomer(b.account || b.username, b.customer_id);
       if (!cust) return send(res, 404, { ok: false, error: "Account not found." });
       const amt = Math.round(Number(b.amount) || 0);
       if (amt <= 0) return send(res, 400, { ok: false, error: "Enter the amount you topped up." });
@@ -958,9 +950,7 @@ const requestHandler = async (req, res) => {
     // ---- Renew using wallet balance (customer-initiated) ----
     if (pathname === "/api/pay/renew-wallet" && req.method === "POST") {
       const b = JSON.parse((await readBody(req)) || "{}");
-      const u = (b.account || b.username || "").trim().toLowerCase();
-      const norm = (x) => String(x || "").toLowerCase().replace(/[\s:-]/g, "");
-      const cust = u ? Customers.list().find((c) => (c.username || "").toLowerCase() === u || (c.account_code || "").toLowerCase() === u || ("ipoe-" + (c.username || "")).toLowerCase() === u || norm(c.mac) === norm(u) || ("ipoe-" + String(c.id).padStart(4, "0")).toLowerCase() === u) : null;
+      const cust = findPayCustomer(b.account || b.username, b.customer_id);
       if (!cust) return send(res, 404, { ok: false, error: "Account not found." });
       const fresh = Customers.get(cust.id);
       const price = Number(fresh.plan_price) || 0;
@@ -1984,7 +1974,8 @@ function portalPageHtml() {
       var f=$("pf").files[0]; if(!f) return alert("Please attach your receipt photo first.");
       btn.disabled=true; $("pmsg").textContent="Uploading\\u2026";
       var img=await fileToDataUrl(f);
-      var r=await fetch("/api/pay/proof",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:ME.customer.username,reference:$("pref").value,note:"via portal",image:img})}).then(x=>x.json());
+      var c=ME.customer;
+      var r=await fetch("/api/pay/proof",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:c.account||c.username,account:c.account||c.username,customer_id:c.id,reference:$("pref").value,note:"via portal",image:img})}).then(x=>x.json());
       btn.disabled=false;
       $("pmsg").innerHTML = r.ok ? '<span class="pill">'+esc(r.message)+'</span>' : (r.error||"Upload failed");
     }
@@ -2227,6 +2218,7 @@ function payPageHtml() {
       var b=$("a-badge"); b.textContent=exp?"ACCOUNT EXPIRED":"ACTIVE"; b.classList.toggle("bad",exp);
       $("a-duelabel").textContent=exp?"Expired":"Active until"; $("a-dueval").textContent=ME.expiry?ME.expiry.slice(0,10):"—";
       $("a-bar").style.width=exp?"100%":"30%";
+      $("acctMsg").textContent=exp?"Account expired — you can still pay via GCash/Maya below. Tap Pay bill to continue.":"";
     }
     function payTab(t){TAB=t;["seg-gcash","seg-maya","tseg-gcash","tseg-maya"].forEach(function(id){var e=$(id);if(e)e.classList.toggle("on",id.indexOf(t)>=0)});paintQR()}
     function paintQR(){
@@ -2658,11 +2650,12 @@ async function handleRouter(req, res, pathname) {
           "/ip firewall filter add chain=forward src-address-list=" + list + " protocol=udp dst-port=53 action=accept comment=\"IPoE/PPPoE suspended: allow DNS\"",
           "/ip firewall filter add chain=forward src-address-list=" + list + " protocol=tcp dst-port=53 action=accept comment=\"IPoE/PPPoE suspended: allow DNS-tcp\"",
           "",
+          paymentAllowFirewallScript({ list }),
+          "",
           "# 3) Block everything else going OUT to the internet for suspended subscribers",
           "/ip firewall filter add chain=forward src-address-list=" + list + " out-interface=" + wan + " action=reject reject-with=icmp-network-unreachable comment=\"IPoE/PPPoE suspended: block internet\"",
           "",
-          "# Tip: make sure these filter rules sit ABOVE your general 'accept established/related' allow rules,",
-          "# or place the block rule early in the forward chain so it takes effect.",
+          "# Tip: rules are evaluated top-to-bottom — payment allow (step 2b) must sit above the block (step 3).",
         ].join("\n");
         return ok({ script, portalIp, port, wan, list });
       }
@@ -4013,7 +4006,7 @@ async function suspendForExpiry(c) {
   tgNotify(`🔴 <b>ACCOUNT EXPIRED</b>\nUser: <b>${c.name}</b>${ident ? ` (${ident})` : ""}\nPlan: ${c.plan_name || "—"}\nExpired: ${c.expiry}\nStatus: moved to SUSPENDED` + (due ? `\nRemaining due: ₱${Number(due).toLocaleString()}` : ""));
   if (Settings.get("notify_customers", "1") === "1" && c.contact) {
     const url = (Settings.get("public_url") || "").replace(/\/$/, "");
-    const pay = url ? ` Settle here: ${url}/pay?u=${encodeURIComponent(c.username || "")}` : "";
+    const pay = url ? ` Settle here: ${url}/pay?u=${encodeURIComponent(payAccountRef(c) || c.username || "")}` : "";
     notifyCustomerMsg(c.contact, c.name, "Internet disconnected", `Hi ${c.name}, your internet is disconnected because your account expired (${c.expiry}). Please settle to reconnect.${pay}`).catch(() => {});
   }
 }
@@ -4494,6 +4487,57 @@ function addMinutes(dt, mins) {
 
 // ---- IPoE lifecycle (static lease by MAC + queue; address-list suspend) ----
 const IPOE_SUSPEND_LIST = "suspended"; // matches the panel's firewall redirect rules
+
+// Hostnames suspended/expired clients must reach to pay via GCash / PayMongo / Maya on-network.
+const PAYMENT_WALL_HOSTS = [
+  "gcash.com", "www.gcash.com", "api.gcash.com", "api-gcash.com",
+  "paymongo.com", "api.paymongo.com", "pm.link", "checkout.paymongo.com", "links.paymongo.com",
+  "maya.ph", "www.maya.ph", "payments.paymaya.com", "gw.paymaya.com", "paymaya.com",
+  "googleapis.com", "gstatic.com",
+];
+
+function normPayQuery(x) { return String(x || "").toLowerCase().replace(/[\s:-]/g, ""); }
+
+// Match PPPoE username, IPoE account (IPOE-0001), MAC, static IP, or mobile — same as /api/pay/lookup.
+function findPayCustomer(query, customerId) {
+  if (customerId) {
+    const byId = Customers.get(Number(customerId));
+    if (byId) return byId;
+  }
+  const u = String(query || "").trim().toLowerCase();
+  if (!u) return null;
+  return Customers.list().find((c) =>
+    (c.username || "").toLowerCase() === u ||
+    (c.account_code || "").toLowerCase() === u ||
+    ("ipoe-" + (c.username || "")).toLowerCase() === u ||
+    ("ipoe-" + String(c.id).padStart(4, "0")).toLowerCase() === u ||
+    normPayQuery(c.mac) === normPayQuery(u) ||
+    (c.static_ip || "") === u ||
+    normPayQuery(c.contact) === normPayQuery(u)
+  ) || null;
+}
+
+function payAccountRef(c) {
+  if (!c) return "";
+  return c.account_code || ((c.conn_type === "ipoe") ? ("IPOE-" + String(c.id).padStart(4, "0")) : (c.username || ""));
+}
+
+function paymentAllowFirewallScript({ list }) {
+  const hosts = PAYMENT_WALL_HOSTS.map((h) => `"${h}"`).join(";");
+  return [
+    "",
+    "# 4) Allow GCash / PayMongo / Maya while suspended (expired IPoE can pay on-network)",
+    "#    Re-run the :foreach block if payment apps stop loading (IPs can change).",
+    `:local payHosts {${hosts}}`,
+    ":foreach d in=$payHosts do={",
+    "  :do { :local ip [:resolve $d]; if ($ip!=\"\") do={ /ip firewall address-list add list=payment-allow address=$ip comment=$d } } on-error={}",
+    "}",
+    `/ip firewall filter add chain=forward src-address-list=${list} dst-address-list=payment-allow action=accept comment="IPoE/PPPoE suspended: allow GCash/PayMongo/Maya"`,
+    "",
+    "# --- Hotspot walled-garden: same payment hosts ---",
+    ...PAYMENT_WALL_HOSTS.map((h) => `/ip hotspot walled-garden add dst-host=${h} comment="payment ${h}"`),
+  ].join("\n");
+}
 function normalizeMac(raw) {
   // Accept AABBCCDDEEFF, aa-bb-cc.., aa:bb:.., with spaces; return canonical AA:BB:CC:DD:EE:FF or "".
   const hex = String(raw || "").toUpperCase().replace(/[^0-9A-F]/g, "");
